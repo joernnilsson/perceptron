@@ -1,9 +1,14 @@
 
 use rand::Rng;
-use rayon::{prelude::*, result};
+// use rayon::{prelude::*, result};
 
 extern crate nalgebra as na;
 use na::SMatrix;
+
+mod image_handling;
+
+extern crate argparse;
+use argparse::{ArgumentParser, Store};
 
 // --- Types
 
@@ -85,15 +90,19 @@ fn make_dataset(n: u64) -> Vec<AnnotatedImage> {
 
 fn train_dataset(dataset: &Vec<AnnotatedImage>, n: u64) -> Matrix20x20f {
     let mut weights = Matrix20x20f::zeros();
+    let bias = 0.0;
 
     for i in 0..n{
         let mut weights_changed: bool = false;
         for image in dataset {
             let output = image.image.dot(&weights);
-            if image.circle && output < 0.5 {
+
+            if image.circle && output < bias {
+                // image is circle, but output is low, so increase weights
                 weights = weights + image.image;
                 weights_changed = true;
-            } else if !image.circle && output > 0.5 {
+            } else if !image.circle && output >= bias {
+                // image is rectangle, but output is high, so decrease weights
                 weights = weights - image.image;
                 weights_changed = true;
             }
@@ -117,6 +126,8 @@ fn validate_dataset(dataset: &Vec<AnnotatedImage>, weights: Matrix20x20f) -> Val
     let mut rectangle_correct: u64 = 0;
     let mut circle_correct: u64 = 0;
 
+    let bias = 0.0;
+
     for image in dataset {
         let output = image.image.dot(&weights);
 
@@ -126,9 +137,9 @@ fn validate_dataset(dataset: &Vec<AnnotatedImage>, weights: Matrix20x20f) -> Val
             rectangle_count += 1;
         }
 
-        if image.circle && output > 0.5 {
+        if image.circle && output > bias {
             circle_correct += 1;
-        } else if !image.circle && output < 0.5 {
+        } else if !image.circle && output <= bias {
             rectangle_correct += 1;
         }
     }
@@ -141,25 +152,119 @@ fn validate_dataset(dataset: &Vec<AnnotatedImage>, weights: Matrix20x20f) -> Val
     }
 }
 
-fn main(){
+fn test_image(image: Matrix20x20f, weights: Matrix20x20f) -> bool {
+    let output = image.dot(&weights);
+    output > 0.5
+}
+
+fn train_and_verify(itreations: u64, dataset_size: u64, validation_dataset_size: u64, output: Option<String>) {
 
     // Make random dataset of circles and rectangles
-    let dataset = make_dataset(2000);
+    let dataset = make_dataset(dataset_size);
 
     // Train model using dataset
     println!("--------------- Training -----------------");
-    let weights = train_dataset(&dataset, 1000);
+    let weights = train_dataset(&dataset, itreations);
 
     // Verify model using dataset
     validate_dataset(&dataset, weights);
 
     // Validate using new dataset of random circles and rectangles
-    let validation_dataset = make_dataset(20);
+    let validation_dataset = make_dataset(validation_dataset_size);
     let validation_result = validate_dataset(&validation_dataset, weights);
     
     println!("---------------- Validation ---------------");
     println!("Rectangles correct: {}/{}", validation_result.rectangles_correct, validation_result.rectangles);
     println!("Circles correct: {}/{}", validation_result.circles_correct, validation_result.circles);
 
+    match output {
+        Some(filename) => {
+            image_handling::save_weights(&weights, &filename);
+        },
+        None => {},
+    }
+}
+
+fn argument_if_set(argument: &String) -> Option<String> {
+    if argument.len() > 0 {
+        Some(argument.clone())
+    } else {
+        None
+    }
+}
+
+fn main() {
+
+    let mut command = "".to_string();
+    
+    // Training options
+    let mut output_filename = "".to_string();
+    let mut itreations = 100;
+    let mut dataset_size = 200;
+    let mut validation_dataset_size = 20;
+
+    // Testing options
+    let mut input_image_filename = "".to_string();
+    let mut input_weights_filename = "".to_string();
+    let mut output_processed_filename = "".to_string();
+
+    { 
+        let mut ap = ArgumentParser::new();
+        ap.set_description("Perceptron");
+
+        // Training options
+        ap.refer(&mut command).add_argument("command", Store, "Command to run");
+        ap.refer(&mut output_filename).add_option(&["--output"], Store, "Output filename for weights");
+        ap.refer(&mut itreations).add_option(&["--iterations"], Store, "Number of iterations to train for");
+        ap.refer(&mut dataset_size).add_option(&["--dataset-size"], Store, "Number of images to use for training");
+        ap.refer(&mut validation_dataset_size).add_option(&["--validation-dataset-size"], Store, "Number of images to use for validation");
+
+        // Testing options
+        ap.refer(&mut input_image_filename).add_option(&["--input-image"], Store, "Image to test");
+        ap.refer(&mut input_weights_filename).add_option(&["--input-weights"], Store, "Weights to use for testing");
+        ap.refer(&mut output_processed_filename).add_option(&["--output-processed"], Store, "Output filename for processed image");
+
+        ap.parse_args_or_exit();
+    }
+
+    // Process arguments
+    let output = argument_if_set(&output_filename);
+    let input_image = argument_if_set(&input_image_filename);
+    let input_weights = argument_if_set(&input_weights_filename);
+    let output_processed = argument_if_set(&output_processed_filename);
+
+    // Required arguments
+    match command.as_str() {
+        "test_image" => {
+            if !input_image.is_some() {
+                println!("Missing argument: --input-image");
+                return;
+            }
+            if !input_weights.is_some() {
+                println!("Missing argument: --input-weights");
+                return;
+            }
+        },
+        _ => {},
+    }
+
+    match command.as_str() {
+        "train" => train_and_verify(itreations, dataset_size, validation_dataset_size, output),
+        "test_image" => {
+            let image = image_handling::read_image(&input_image_filename);
+            let weights = image_handling::read_weights(&input_weights_filename);
+            let result = test_image(image, weights);
+            if result {
+                println!("Image is a circle");
+            } else {
+                println!("Image is a rectangle");
+            }
+
+            if output_processed.is_some() {
+                image_handling::save_image(&image, &output_processed.unwrap());
+            }
+        },
+        _ => println!("Unknown command: {}", command),
+    }
 
 }
